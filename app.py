@@ -222,7 +222,6 @@ async def _startup():
     cfg = _load_config()
     _validate_config(cfg)
     func.DATALAB_API_KEY = cfg["datalab_key"]
-    func.ANTHROPIC_API_KEY = cfg.get("anthropic_key", "")
     asyncio.create_task(_cleanup_jobs())
     log.info("Sledat API started")
 
@@ -238,7 +237,6 @@ def health():
 async def _run_extract(job_id: str, image_bytes: bytes, mode: str, reject_items: list[str] | None = None) -> None:
     cfg = _load_config()
     func.DATALAB_API_KEY = cfg["datalab_key"]
-    func.ANTHROPIC_API_KEY = cfg.get("anthropic_key", "")
     storage = _storage_path()
     ts_start = time.time()
 

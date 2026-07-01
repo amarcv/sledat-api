@@ -814,41 +814,45 @@ def _clean_bic_raw(raw: str) -> str:
     return raw
 
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-
-
 def check_image_content(image_bytes: bytes, reject_items: list[str]) -> tuple[bool, str]:
-    """Return (rejected, reason). Uses Claude vision to detect forbidden objects in the scene."""
-    import anthropic
-    import base64
-    key = ANTHROPIC_API_KEY
-    if not key:
-        log.warning("check_image_content: ANTHROPIC_API_KEY not set, skipping filter")
-        return False, ""
+    """Return (rejected, reason).
+
+    Piggybacks on the DataLabs CMR extraction — adds a forbidden-object field to the
+    schema so the same API call detects physical objects placed on the document.
+    No extra API key or model needed.
+    """
     items_str = ", ".join(reject_items)
-    image_bytes = _resize_to(image_bytes, 1920 * 1440)
-    b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
-    client = anthropic.Anthropic(api_key=key)
-    msg = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=128,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
-                {"type": "text", "text": (
-                    f"Look at this image carefully. Do you see any of these objects physically present in the scene: {items_str}?\n"
-                    "Answer with exactly one line: YES: <object name> or NO"
-                )},
-            ],
-        }],
-    )
-    reply = msg.content[0].text.strip().upper()
-    log.info(f"check_image_content: model reply={reply!r}")
-    if reply.startswith("YES"):
-        found = reply[3:].strip(": ").strip() or items_str
-        return True, f"Image contains {found.lower()}. Please retake the photo without it."
-    return False, ""
+    schema = {
+        "type": "object",
+        "properties": {
+            "forbidden_objects_present": {
+                "type": "boolean",
+                "description": (
+                    f"True if any of these objects ({items_str}) are physically placed on top of "
+                    "the document and blocking or covering its text. "
+                    "False if the document surface is fully clear."
+                ),
+            },
+            "forbidden_objects_found": {
+                "type": "string",
+                "description": f"Name the specific object ({items_str}) physically on the document, or null if none.",
+            },
+        },
+        "required": ["forbidden_objects_present"],
+    }
+    image_bytes = _resize_to(image_bytes, 3840 * 2160)
+    files = {"file": ("image.jpg", image_bytes, "image/jpeg")}
+    data  = {"page_schema": json.dumps(schema), "extraction_mode": "turbo"}
+    result = _post_and_poll("extract", files, data)
+    raw_json = result.get("extraction_schema_json") or "{}"
+    try:
+        extracted = json.loads(raw_json)
+        if extracted.get("forbidden_objects_present"):
+            found = extracted.get("forbidden_objects_found") or items_str
+            return True, f"Image contains {found}. Please retake the photo without it."
+        return False, ""
+    except (json.JSONDecodeError, AttributeError):
+        return False, ""
 
 
 def ocr_bic(image_bytes: bytes) -> str:

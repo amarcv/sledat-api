@@ -6,4 +6,3 @@ Pillow
 opencv-python
 numpy
 prometheus-client
-anthropic
