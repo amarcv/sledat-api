@@ -32,6 +32,37 @@ def _order_points(pts: np.ndarray) -> np.ndarray:
     return rect
 
 
+def _quad_spans_doc(approx, img_w, img_h, min_area):
+    """Reject quads that are clearly just a sub-section of the document.
+
+    The shorter bounding-box dimension must be at least 50% of the corresponding
+    image dimension, so internal CMR boxes (right column, bottom panel) don't win.
+    """
+    if cv2.contourArea(approx) < min_area:
+        return False
+    x, y, bw, bh = cv2.boundingRect(approx)
+    return (bw / img_w) >= 0.50 and (bh / img_h) >= 0.50
+
+
+def _search_contours(contours, img_w, img_h, min_area):
+    """Return first 4-corner polygon that passes the document-span check."""
+    for c in contours:
+        if cv2.contourArea(c) < min_area:
+            break
+        peri = cv2.arcLength(c, True)
+        for eps in (0.02, 0.04, 0.06, 0.08, 0.10):
+            approx = cv2.approxPolyDP(c, eps * peri, True)
+            if len(approx) == 4 and _quad_spans_doc(approx, img_w, img_h, min_area):
+                return approx
+        hull = cv2.convexHull(c)
+        peri = cv2.arcLength(hull, True)
+        for eps in (0.02, 0.04, 0.06, 0.08, 0.10):
+            approx = cv2.approxPolyDP(hull, eps * peri, True)
+            if len(approx) == 4 and _quad_spans_doc(approx, img_w, img_h, min_area):
+                return approx
+    return None
+
+
 def crop_document(image_bytes: bytes) -> bytes:
     """Find the document outline and warp it flat. Returns original if no clear outline found."""
     nparr = np.frombuffer(image_bytes, np.uint8)
@@ -42,37 +73,24 @@ def crop_document(image_bytes: bytes) -> bytes:
     h, w = img.shape[:2]
     min_area = h * w * 0.05  # document must cover at least 5% of frame
 
+    # Pass 1: Canny edges — works well when document has visible border
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
     edges = cv2.Canny(blur, 75, 200)
     edges = cv2.dilate(edges, np.ones((5, 5), np.uint8), iterations=1)
-
     contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     contours = sorted(contours, key=cv2.contourArea, reverse=True)[:10]
+    doc_contour = _search_contours(contours, w, h, min_area)
 
-    doc_contour = None
-    for c in contours:
-        if cv2.contourArea(c) < min_area:
-            break
-        # try progressively looser approximation
-        peri = cv2.arcLength(c, True)
-        for eps in (0.02, 0.04, 0.06, 0.08, 0.10):
-            approx = cv2.approxPolyDP(c, eps * peri, True)
-            if len(approx) == 4 and cv2.contourArea(approx) > min_area:
-                doc_contour = approx
-                break
-        if doc_contour is not None:
-            break
-        # if still not 4 corners, try convex hull of the contour
-        hull = cv2.convexHull(c)
-        peri = cv2.arcLength(hull, True)
-        for eps in (0.02, 0.04, 0.06, 0.08, 0.10):
-            approx = cv2.approxPolyDP(hull, eps * peri, True)
-            if len(approx) == 4 and cv2.contourArea(approx) > min_area:
-                doc_contour = approx
-                break
-        if doc_contour is not None:
-            break
+    # Pass 2: OTSU threshold — works well for white document on dark background
+    if doc_contour is None:
+        big_blur = cv2.GaussianBlur(gray, (21, 21), 0)
+        _, thresh = cv2.threshold(big_blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        kernel = np.ones((15, 15), np.uint8)
+        closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+        contours2, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours2 = sorted(contours2, key=cv2.contourArea, reverse=True)[:5]
+        doc_contour = _search_contours(contours2, w, h, min_area)
 
     if doc_contour is None:
         log.info("crop_document: no document contour found, returning original")
