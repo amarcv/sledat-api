@@ -8,13 +8,14 @@ Uses [DataLabs](https://datalab.to) for text extraction. Includes document deske
 
 ## How it works
 
-Each request goes through the following steps:
+Each request goes through these steps:
 
 1. Original image saved to disk as `{job_id}_original.jpg`
-2. Document outline detected and image deskewed
-3. Deskewed image saved as `{job_id}_obdelana.jpg`
-4. OCR run via DataLabs API
-5. Result stored and telemetry row appended to `telemetry.csv`
+2. Document outline detected and image deskewed (saved as `{job_id}_obdelana.jpg`)
+3. If `reject_if` is set, image is checked for forbidden objects before OCR runs
+4. OCR run via DataLabs API on the original image
+5. Result stored, deskewed image returned as base64 alongside OCR output
+6. Telemetry row appended to `telemetry.csv`
 
 Processing is async. Submit a job, get a `job_id`, poll until done.
 
@@ -28,7 +29,7 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
-Edit `config.json`:
+Copy `config.example.json` to `config.json` and fill in your keys:
 
 ```json
 {
@@ -37,7 +38,7 @@ Edit `config.json`:
   "max_image_mb": 25,
   "keys": {
     "your-api-key": {
-      "label": "miha",
+      "label": "default",
       "rate_limit_per_minute": 60
     }
   }
@@ -63,8 +64,9 @@ All requests require `X-API-Key` header.
 Submit an image for processing.
 
 **Form fields:**
-- `file` - image file (JPEG or PNG)
-- `mode` - `auto` (default), `bic` (container only), or `cmr` (document only)
+- `file` — image file (JPEG or PNG)
+- `mode` — `auto` (default), `bic` (container only), or `cmr` (document only)
+- `reject_if` — optional comma-separated list of objects that should not appear in the image (e.g. `cigarette,pen`). If detected, the job is rejected without running OCR.
 
 **Response:**
 ```json
@@ -101,8 +103,17 @@ Poll for result.
     "box1_sender": "...",
     "box2_consignee": "...",
     "box3_place_of_delivery": "...",
-    ...
-  }
+    "...": "24 fields total"
+  },
+  "cropped_image": "<base64 JPEG of deskewed document, if crop was found>"
+}
+```
+
+**Rejected (forbidden object detected):**
+```json
+{
+  "status": "rejected",
+  "reason": "Image contains cigarette. Please retake the photo without it."
 }
 ```
 
@@ -121,8 +132,8 @@ Jobs expire after 10 minutes.
 | Mode | What it does | DataLabs tier | Approx. time |
 |------|-------------|---------------|--------------|
 | `bic` | Reads container code | fast | 10-30s |
-| `cmr` | Reads transport document | balanced | 30-90s |
-| `auto` | Tries BIC first, falls back to CMR if not found | both | 20-90s |
+| `cmr` | Reads transport document | turbo | 5-15s |
+| `auto` | Tries BIC first, falls back to CMR if not found | fast + turbo | 10-40s |
 
 ---
 
@@ -149,7 +160,7 @@ Prometheus and Grafana run via Docker Compose:
 
 ```bash
 cd monitoring
-docker compose up -d
+docker compose up --detach
 ```
 
 - Grafana: http://localhost:3000 (admin / sledat)

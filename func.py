@@ -815,12 +815,7 @@ def _clean_bic_raw(raw: str) -> str:
 
 
 def check_image_content(image_bytes: bytes, reject_items: list[str]) -> tuple[bool, str]:
-    """Return (rejected, reason).
-
-    Piggybacks on the DataLabs CMR extraction — adds a forbidden-object field to the
-    schema so the same API call detects physical objects placed on the document.
-    No extra API key or model needed.
-    """
+    """Return (rejected, reason). Asks DataLabs to check for forbidden objects on the document."""
     items_str = ", ".join(reject_items)
     schema = {
         "type": "object",
