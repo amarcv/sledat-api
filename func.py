@@ -986,6 +986,6 @@ def run_pipeline(image_bytes: bytes, mode: str = "auto", job_id: str = "") -> di
 
     # auto mode: BIC not found, fall back to CMR
     t0 = time.time()
-    fields = ocr_cmr(image_bytes, quality="balanced")
+    fields = ocr_cmr(image_bytes, quality="turbo")
     log.info(f"{tag}datalab cmr fallback done in {time.time()-t0:.1f}s")
     return {"mode": "cmr", "fields": fields}
