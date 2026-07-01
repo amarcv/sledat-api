@@ -645,9 +645,13 @@ def extract_bic(ocr_text: str) -> tuple[str | list | None, str, int]:
     if ambiguous_bics:
         # Prefer freight containers (4th letter = 'U', ISO 6346)
         u_first = [b for b in ambiguous_bics if len(b) >= 4 and b[3] == 'U']
-        if len(u_first) == 1:
-            return u_first[0], "recovered", 1
-        return (u_first if u_first else ambiguous_bics), "brute_forced", 1
+        effective = u_first if u_first else ambiguous_bics
+        # Only "recovered" if there is genuinely one candidate total — not just
+        # one U-container among several valid BICs. Multiple valid BICs means
+        # we cannot be confident, regardless of equipment category filtering.
+        if len(ambiguous_bics) == 1:
+            return effective[0], "recovered", 1
+        return effective, "brute_forced", 1
 
     for c in full_candidates + recovered_candidates:
         hit = _brute_force(c)
