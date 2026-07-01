@@ -1,5 +1,6 @@
 {
   "datalab_key": "your-datalab-api-key-here",
+  "anthropic_key": "sk-ant-...",
   "ocr_timeout": 120,
   "max_image_mb": 25,
   "storage_path": "/path/to/image/storage",

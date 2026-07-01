@@ -814,6 +814,43 @@ def _clean_bic_raw(raw: str) -> str:
     return raw
 
 
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
+
+def check_image_content(image_bytes: bytes, reject_items: list[str]) -> tuple[bool, str]:
+    """Return (rejected, reason). Uses Claude vision to detect forbidden objects in the scene."""
+    import anthropic
+    import base64
+    key = ANTHROPIC_API_KEY
+    if not key:
+        log.warning("check_image_content: ANTHROPIC_API_KEY not set, skipping filter")
+        return False, ""
+    items_str = ", ".join(reject_items)
+    image_bytes = _resize_to(image_bytes, 1920 * 1440)
+    b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+    client = anthropic.Anthropic(api_key=key)
+    msg = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=128,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                {"type": "text", "text": (
+                    f"Look at this image carefully. Do you see any of these objects physically present in the scene: {items_str}?\n"
+                    "Answer with exactly one line: YES: <object name> or NO"
+                )},
+            ],
+        }],
+    )
+    reply = msg.content[0].text.strip().upper()
+    log.info(f"check_image_content: model reply={reply!r}")
+    if reply.startswith("YES"):
+        found = reply[3:].strip(": ").strip() or items_str
+        return True, f"Image contains {found.lower()}. Please retake the photo without it."
+    return False, ""
+
+
 def ocr_bic(image_bytes: bytes) -> str:
     """Send a container image to Datalab and return a space-formatted BIC string.
 

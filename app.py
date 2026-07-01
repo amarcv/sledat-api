@@ -222,6 +222,7 @@ async def _startup():
     cfg = _load_config()
     _validate_config(cfg)
     func.DATALAB_API_KEY = cfg["datalab_key"]
+    func.ANTHROPIC_API_KEY = cfg.get("anthropic_key", "")
     asyncio.create_task(_cleanup_jobs())
     log.info("Sledat API started")
 
@@ -234,13 +235,26 @@ def health():
     }
 
 
-async def _run_extract(job_id: str, image_bytes: bytes, mode: str) -> None:
+async def _run_extract(job_id: str, image_bytes: bytes, mode: str, reject_items: list[str] | None = None) -> None:
     cfg = _load_config()
     func.DATALAB_API_KEY = cfg["datalab_key"]
+    func.ANTHROPIC_API_KEY = cfg.get("anthropic_key", "")
     storage = _storage_path()
     ts_start = time.time()
 
     (storage / f"{job_id}_original.jpg").write_bytes(image_bytes)
+
+    # Content filter — runs before OCR, cheap fast check
+    if reject_items:
+        try:
+            rejected, reason = await asyncio.to_thread(func.check_image_content, image_bytes, reject_items)
+            if rejected:
+                log.info(f"[{job_id}] rejected: {reason}")
+                _store_job(job_id, {"status": "rejected", "reason": reason})
+                _log_telemetry(job_id, ts_start, time.time(), mode, "", 0, False)
+                return
+        except Exception as e:
+            log.warning(f"[{job_id}] content check failed ({e}), proceeding anyway")
 
     # Crop independently — does not affect OCR input
     try:
@@ -289,9 +303,15 @@ async def _run_extract(job_id: str, image_bytes: bytes, mode: str) -> None:
 async def post_extract(
     file: UploadFile = File(...),
     mode: str = Form("auto"),
+    reject_if: str = Form(""),
     _key: str = Depends(verify_key),
 ):
-    """Submit an image. Returns { job_id }. Poll /api/jobs/{job_id} for result."""
+    """Submit an image. Returns { job_id }. Poll /api/jobs/{job_id} for result.
+
+    reject_if: optional comma-separated list of objects that should not appear
+               in the image (e.g. 'cigarette,pen'). If found, job returns
+               { status: rejected, reason: '...' } without running OCR.
+    """
     if mode not in ("auto", "bic", "cmr"):
         raise HTTPException(status_code=400, detail="mode must be auto, bic, or cmr")
 
@@ -304,10 +324,12 @@ async def post_extract(
     if not any(image_bytes.startswith(sig) for sig in _IMAGE_MAGIC):
         raise HTTPException(status_code=415, detail="File does not appear to be a valid image")
 
+    reject_items = [x.strip() for x in reject_if.split(",") if x.strip()] if reject_if else []
+
     job_id = str(uuid.uuid4())
     _store_job(job_id, None)
-    asyncio.create_task(_run_extract(job_id, image_bytes, mode))
-    log.info(f"[{job_id}] queued mode={mode!r}")
+    asyncio.create_task(_run_extract(job_id, image_bytes, mode, reject_items))
+    log.info(f"[{job_id}] queued mode={mode!r} reject_if={reject_items}")
     return {"job_id": job_id}
 
 
@@ -321,6 +343,8 @@ async def get_job(job_id: str, _key: str = Depends(verify_key_readonly)):
         return {"status": "pending"}
     del _jobs[job_id]
     _job_times.pop(job_id, None)
+    if result.get("status") == "rejected":
+        return result
     return {"status": "done", **result}
 
 
