@@ -40,7 +40,7 @@ def crop_document(image_bytes: bytes) -> bytes:
         return image_bytes
 
     h, w = img.shape[:2]
-    min_area = h * w * 0.15  # document must cover at least 15% of frame
+    min_area = h * w * 0.05  # document must cover at least 5% of frame
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -52,10 +52,26 @@ def crop_document(image_bytes: bytes) -> bytes:
 
     doc_contour = None
     for c in contours:
+        if cv2.contourArea(c) < min_area:
+            break
+        # try progressively looser approximation
         peri = cv2.arcLength(c, True)
-        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-        if len(approx) == 4 and cv2.contourArea(approx) > min_area:
-            doc_contour = approx
+        for eps in (0.02, 0.04, 0.06, 0.08, 0.10):
+            approx = cv2.approxPolyDP(c, eps * peri, True)
+            if len(approx) == 4 and cv2.contourArea(approx) > min_area:
+                doc_contour = approx
+                break
+        if doc_contour is not None:
+            break
+        # if still not 4 corners, try convex hull of the contour
+        hull = cv2.convexHull(c)
+        peri = cv2.arcLength(hull, True)
+        for eps in (0.02, 0.04, 0.06, 0.08, 0.10):
+            approx = cv2.approxPolyDP(hull, eps * peri, True)
+            if len(approx) == 4 and cv2.contourArea(approx) > min_area:
+                doc_contour = approx
+                break
+        if doc_contour is not None:
             break
 
     if doc_contour is None:
