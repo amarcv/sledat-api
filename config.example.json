@@ -1,0 +1,12 @@
+{
+  "datalab_key": "your-datalab-api-key-here",
+  "ocr_timeout": 120,
+  "max_image_mb": 25,
+  "storage_path": "/path/to/image/storage",
+  "keys": {
+    "your-api-key-here": {
+      "label": "default",
+      "rate_limit_per_minute": 60
+    }
+  }
+}

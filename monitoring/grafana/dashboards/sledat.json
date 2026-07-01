@@ -1,0 +1,94 @@
+{
+  "title": "Sledat OCR",
+  "uid": "sledat-ocr",
+  "schemaVersion": 38,
+  "refresh": "30s",
+  "time": { "from": "now-24h", "to": "now" },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Total Jobs",
+      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+      "options": { "colorMode": "value", "graphMode": "area" },
+      "targets": [{ "expr": "sum(sledat_jobs_total)", "legendFormat": "total", "datasource": "Prometheus" }]
+    },
+    {
+      "id": 2, "type": "stat", "title": "Success Rate",
+      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+      "options": { "colorMode": "value", "unit": "percentunit" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "thresholds": { "steps": [
+        { "color": "red", "value": 0 },
+        { "color": "yellow", "value": 0.8 },
+        { "color": "green", "value": 0.95 }
+      ]}}},
+      "targets": [{ "expr": "sum(sledat_jobs_total{success=\"1\"}) / sum(sledat_jobs_total)", "legendFormat": "rate", "datasource": "Prometheus" }]
+    },
+    {
+      "id": 3, "type": "stat", "title": "Avg Processing Time",
+      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+      "options": { "colorMode": "value" },
+      "fieldConfig": { "defaults": { "unit": "s" }},
+      "targets": [{ "expr": "rate(sledat_processing_duration_seconds_sum[1h]) / rate(sledat_processing_duration_seconds_count[1h])", "legendFormat": "avg", "datasource": "Prometheus" }]
+    },
+    {
+      "id": 4, "type": "stat", "title": "BIC Jobs",
+      "gridPos": { "x": 12, "y": 0, "w": 3, "h": 4 },
+      "options": { "colorMode": "value", "graphMode": "area" },
+      "targets": [{ "expr": "sum(sledat_jobs_total{mode=\"bic\"})", "legendFormat": "BIC", "datasource": "Prometheus" }]
+    },
+    {
+      "id": 5, "type": "stat", "title": "CMR Jobs",
+      "gridPos": { "x": 15, "y": 0, "w": 3, "h": 4 },
+      "options": { "colorMode": "value", "graphMode": "area" },
+      "targets": [{ "expr": "sum(sledat_jobs_total{mode=\"cmr\"})", "legendFormat": "CMR", "datasource": "Prometheus" }]
+    },
+    {
+      "id": 6, "type": "stat", "title": "Failed Jobs",
+      "gridPos": { "x": 18, "y": 0, "w": 3, "h": 4 },
+      "options": { "colorMode": "background" },
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [
+        { "color": "green", "value": 0 },
+        { "color": "red", "value": 1 }
+      ]}}},
+      "targets": [{ "expr": "sum(sledat_jobs_total{success=\"0\"}) or vector(0)", "legendFormat": "failed", "datasource": "Prometheus" }]
+    },
+    {
+      "id": 7, "type": "stat", "title": "Jobs Last Hour",
+      "gridPos": { "x": 21, "y": 0, "w": 3, "h": 4 },
+      "options": { "colorMode": "value", "graphMode": "area" },
+      "targets": [{ "expr": "increase(sledat_jobs_total[1h])", "legendFormat": "last 1h", "datasource": "Prometheus" }]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Jobs Over Time",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "custom": { "lineWidth": 2, "fillOpacity": 10 }}},
+      "targets": [
+        { "expr": "increase(sledat_jobs_total{mode=\"bic\",success=\"1\"}[5m])", "legendFormat": "BIC ok", "datasource": "Prometheus" },
+        { "expr": "increase(sledat_jobs_total{mode=\"cmr\",success=\"1\"}[5m])", "legendFormat": "CMR ok", "datasource": "Prometheus" },
+        { "expr": "increase(sledat_jobs_total{success=\"0\"}[5m])", "legendFormat": "failed", "datasource": "Prometheus" }
+      ]
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "Processing Duration",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10 }}},
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(sledat_processing_duration_seconds_bucket{mode=\"bic\"}[5m]))", "legendFormat": "BIC p50", "datasource": "Prometheus" },
+        { "expr": "histogram_quantile(0.95, rate(sledat_processing_duration_seconds_bucket{mode=\"bic\"}[5m]))", "legendFormat": "BIC p95", "datasource": "Prometheus" },
+        { "expr": "histogram_quantile(0.50, rate(sledat_processing_duration_seconds_bucket{mode=\"cmr\"}[5m]))", "legendFormat": "CMR p50", "datasource": "Prometheus" },
+        { "expr": "histogram_quantile(0.95, rate(sledat_processing_duration_seconds_bucket{mode=\"cmr\"}[5m]))", "legendFormat": "CMR p95", "datasource": "Prometheus" }
+      ]
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "Avg CMR Fields Filled",
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 7 },
+      "fieldConfig": { "defaults": { "min": 0, "max": 24, "custom": { "lineWidth": 2, "fillOpacity": 10 }}},
+      "targets": [{ "expr": "rate(sledat_cmr_fields_filled_sum[5m]) / rate(sledat_cmr_fields_filled_count[5m])", "legendFormat": "avg fields", "datasource": "Prometheus" }]
+    },
+    {
+      "id": 11, "type": "piechart", "title": "BIC Confidence",
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 7 },
+      "options": { "pieType": "pie", "displayLabels": ["name", "percent"] },
+      "targets": [{ "expr": "sum by (confidence) (sledat_bic_confidence_total)", "legendFormat": "{{confidence}}", "datasource": "Prometheus" }]
+    }
+  ]
+}

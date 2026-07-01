@@ -1,0 +1,8 @@
+config.json
+telemetry.csv
+__pycache__/
+*.pyc
+*.pyo
+images/
+*.jpg
+*.png
