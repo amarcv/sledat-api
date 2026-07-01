@@ -829,6 +829,11 @@ def _clean_bic_raw(raw: str) -> str:
     tokens = raw.split()
     if not tokens or raw.strip().lower() == "none":
         return raw
+    # Case 0: trailing ISO size/type code (e.g. "45G1", "22G0", "40HC") appended
+    # after the check digit — strip it so the check digit is the last token.
+    if len(tokens) >= 2 and re.fullmatch(r"\d{2}[A-Z0-9]{2}", tokens[-1]):
+        tokens = tokens[:-1]
+        raw = " ".join(tokens)
     last = tokens[-1]
     # Case 1: single letter where a digit is expected → replace with '?'
     if re.fullmatch(r"[A-Z]", last):
