@@ -869,6 +869,7 @@ _BIC_SCHEMA = json.dumps({
                 "read ALL lines that form the BIC (owner prefix, then serial digits, then check digit) "
                 "and combine them into one space-separated string. "
                 "Use ? for any character that is covered, scratched out, or unclear. "
+                "If a character is physically blocked or missing, you MUST write ? — do not guess. "
                 "If the check digit looks like a letter instead of a digit, write ? for it. "
                 "If the check digit box is obscured but the rest is readable, output the "
                 "4 letters and 6 serial digits without a check digit. "
@@ -877,28 +878,6 @@ _BIC_SCHEMA = json.dumps({
                 "|  'PSSU 802397' (check digit box hidden)  "
                 "|  'CPWU 804 18 8' (digits split across lines, read top-to-bottom)  "
                 "|  'MOFU 077 1250 4' (serial continues on next line, stop before ISO size code)."
-            ),
-        },
-        "bic_check_digit": {
-            "type": "string",
-            "description": (
-                "ONLY the single check digit from the small separate box at the right end "
-                "of the BIC. It is always one digit (0-9). "
-                "Read this box directly — do not copy from bic_raw. "
-                "Return null if the box is physically blocked."
-            ),
-        },
-        "bic_owner_code": {
-            "type": "string",
-            "description": (
-                "ONLY the 4-letter owner prefix at the very start of the BIC — "
-                "the block of exactly 4 capital letters before the 6-digit serial number. "
-                "Read each letter independently and very carefully. "
-                "Critical confusion to avoid: D has a flat straight LEFT edge and curves to the right; "
-                "O is a complete oval with NO flat edge anywhere. "
-                "Also watch: I is a plain vertical stroke, L has a short foot at the bottom. "
-                "The 4th letter is almost always U for shipping containers. "
-                "Return exactly 4 capital letters, or null if the owner code is blocked."
             ),
         },
     },
@@ -1033,19 +1012,26 @@ def _clean_bic_raw(raw: str) -> str:
             if not is_valid_bic(condensed):
                 return " ".join(tokens[:-1])
     # Case 3: multi-digit last token that produced an invalid or oversized condensed form.
-    # (a) 11-char but wrong check: the model bundled a serial digit with the check.
-    # (b) 12-char: a stray digit (e.g. the first digit of the ISO type code "22G1")
-    #     was appended before the check digit: "FCBU 868092 17" → keep only last char.
+    # The model sometimes bundles the check digit with an adjacent stray digit (e.g. the
+    # first char of the ISO type code):
+    #   "17" → type_start='1' then check='7' → take last char  ("FCBU 868092 17" → "7")
+    #   "71" → check='7' then type_start='1' → take first char ("FCBU 86 092 71" → "7")
+    # Try each single character in the trailing token; use the one that yields a valid BIC.
     if re.fullmatch(r"\d{2,}", last):
         condensed = re.sub(r"[^A-Z0-9]", "", raw.upper())
+        prefix_tokens = " ".join(tokens[:-1])
         if len(condensed) == 11 and re.fullmatch(r"[A-Z]{4}\d{7}", condensed):
             if not is_valid_bic(condensed):
-                return " ".join(tokens[:-1]) + " " + last[-1]
+                for ch in dict.fromkeys([last[0], last[-1]]):  # try first, then last
+                    candidate = condensed[:10] + ch
+                    if is_valid_bic(candidate):
+                        return prefix_tokens + " " + ch
+                return prefix_tokens + " " + last[-1]  # fallback
         elif len(condensed) == 12 and re.fullmatch(r"[A-Z]{4}\d{8}", condensed):
-            # condensed[:10] + condensed[-1] = owner+serial + last digit as check
-            candidate = condensed[:10] + condensed[-1]
-            if is_valid_bic(candidate):
-                return " ".join(tokens[:-1]) + " " + last[-1]
+            for ch in dict.fromkeys([last[-1], last[0]]):
+                candidate = condensed[:10] + ch
+                if is_valid_bic(candidate):
+                    return prefix_tokens + " " + ch
     return raw
 
 
@@ -1086,14 +1072,12 @@ def check_image_content(image_bytes: bytes, reject_items: list[str]) -> tuple[bo
 
 
 def ocr_bic(image_bytes: bytes) -> tuple[str, str | None]:
-    """Send a container image to Datalab and return (raw_text, confirmed_check).
+    """Send a container image to Datalab and return (raw_text, None).
 
-    raw_text is space-formatted BIC output fed to extract_bic().
-    confirmed_check is the single check digit read from the dedicated check-digit
-    box (bic_check_digit schema field), or None when unavailable.  It is passed
-    separately to extract_bic() so that a confirmed mismatch with the serial can
-    drive serial brute-force without touching the "next-char" mismatch path used
-    for type-code-bleed recovery.
+    raw_text is the bic_raw schema field, cleaned and passed to extract_bic().
+    The model is instructed to write ? for any covered or unclear character and to
+    leave a space between visually separate groups — the program infers missing
+    characters from those markers rather than relying on a separate check-digit field.
 
     Returns ('none', None) if no BIC code is visible.
     Uses extraction_mode='fast' ($6/1K pages) — sufficient for a single code read.
@@ -1103,40 +1087,15 @@ def ocr_bic(image_bytes: bytes) -> tuple[str, str | None]:
     data  = {"page_schema": _BIC_SCHEMA, "extraction_mode": "fast"}
     result = _post_and_poll("extract", files, data)
     raw_json = result.get("extraction_schema_json", "{}")
-    # DataLabs also returns a raw markdown OCR pass — use it as the primary OCR text
-    # fed to extract_bic(). The schema fields serve as structured supplements.
     markdown_text = (result.get("markdown") or "").upper()
     try:
         extracted = json.loads(raw_json)
         value = (extracted.get("bic_raw") or "none").strip()
-        check = (extracted.get("bic_check_digit") or "").strip()
         cleaned = _clean_bic_raw(value)
-        confirmed = check if re.fullmatch(r"\d", check) else None
 
-        # Owner-code correction: if model re-read the 4 owner letters separately,
-        # use that value when it differs from bic_raw (catches D/O, I/L confusions).
-        owner_code = (extracted.get("bic_owner_code") or "").strip().upper()
-        if re.fullmatch(r"[A-Z]{4}", owner_code):
-            alnum_c = re.sub(r"[^A-Z0-9]", "", cleaned.upper())
-            if len(alnum_c) >= 4 and re.fullmatch(r"[A-Z]{4}", alnum_c[:4]) and alnum_c[:4] != owner_code:
-                cleaned = re.sub(r'^[A-Z]{4}', owner_code, cleaned, count=1)
-            elif (len(alnum_c) >= 3 and re.fullmatch(r"[A-Z]{3}", alnum_c[:3])
-                  and not alnum_c[3:4].isalpha()):
-                # 3-letter condensed prefix: a space in bic_raw marks the covered owner
-                # letter (e.g. "BE U 103036 4"). Substitute the full 4-letter owner_code
-                # so extract_bic() sees a complete 11-char string.
-                cleaned = owner_code + alnum_c[3:]
-
-        # If bic_raw already ends with the confirmed check digit, don't pass it separately
-        tokens = cleaned.split()
-        if tokens and tokens[-1] == confirmed:
-            confirmed = None
-
-        # Primary: schema-cleaned field only. The markdown OCR text contains weight
-        # specs, company names, and table data that generate spurious BIC-like windows.
         # Fallback: if the schema field has fewer than 10 alnum chars it is too short
         # to contain a BIC — supplement with markdown so extract_bic() can find it.
-        alnum_c = re.sub(r"[^A-Z0-9]", "", cleaned.upper())
+        alnum_c = re.sub(r"[^A-Z0-9?]", "", cleaned.upper())
         if len(alnum_c) < 10 and markdown_text:
             md_clean = re.sub(
                 r'!\[[^\]]*\]\([^)]*\)\n\n.+?\n\n(?:.+?\n\n)?',
@@ -1144,8 +1103,8 @@ def ocr_bic(image_bytes: bytes) -> tuple[str, str | None]:
                 markdown_text,
                 flags=re.DOTALL,
             )
-            return cleaned + " " + md_clean, confirmed
-        return cleaned, confirmed
+            return cleaned + " " + md_clean, None
+        return cleaned, None
     except (json.JSONDecodeError, AttributeError):
         return markdown_text or "none", None
 
