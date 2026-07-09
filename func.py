@@ -1094,6 +1094,15 @@ def ocr_bic(image_bytes: bytes) -> tuple[str, str | None]:
     try:
         extracted = json.loads(raw_json)
         value = (extracted.get("bic_raw") or "none").strip()
+        # If value looks like an invalid 11-char BIC, the serial likely has a
+        # misread digit but the check digit (in its own box) is correct. Save it
+        # so the algebraic solve can recover the right serial digit.
+        confirmed_check: int | None = None
+        _pre_tok = value.split()
+        if _pre_tok and re.fullmatch(r"\d", _pre_tok[-1]):
+            _pre_cond = re.sub(r"[^A-Z0-9]", "", value.upper())
+            if len(_pre_cond) == 11 and not is_valid_bic(_pre_cond):
+                confirmed_check = _pre_tok[-1]
         cleaned = _clean_bic_raw(value)
 
         # <9 alnum chars means extraction is too short; fall back to markdown.
@@ -1106,8 +1115,8 @@ def ocr_bic(image_bytes: bytes) -> tuple[str, str | None]:
                 markdown_text,
                 flags=re.DOTALL,
             )
-            return cleaned + " " + md_clean, None
-        return cleaned, None
+            return cleaned + " " + md_clean, confirmed_check
+        return cleaned, confirmed_check
     except (json.JSONDecodeError, AttributeError):
         return markdown_text or "none", None
 
