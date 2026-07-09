@@ -277,7 +277,7 @@ async def _run_extract(job_id: str, image_bytes: bytes, mode: str, reject_items:
         ts_end = time.time()
         actual_mode = result.get("mode", mode)
         bic = result.get("bic") or ""
-        fields_filled = sum(1 for v in (result.get("fields") or {}).values() if v)
+        fields_filled = sum(1 for v in (result.get("fields") or {}).values() if v and v != [])
         confidence = result.get("confidence", "")
 
         _jobs_total.labels(mode=actual_mode, success="1").inc()
@@ -310,8 +310,8 @@ async def post_extract(
                in the image (e.g. 'cigarette,pen'). If found, job returns
                { status: rejected, reason: '...' } without running OCR.
     """
-    if mode not in ("auto", "bic", "cmr"):
-        raise HTTPException(status_code=400, detail="mode must be auto, bic, or cmr")
+    if mode not in ("auto", "bic", "cmr", "receipt"):
+        raise HTTPException(status_code=400, detail="mode must be auto, bic, cmr, or receipt")
 
     cfg = _load_config()
     max_mb = cfg.get("max_image_mb", 25)

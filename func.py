@@ -356,7 +356,7 @@ def _recover_wildcards_all(candidate: str) -> list[str]:
     """Return all valid BICs for '?' or wrong-type positions in the candidate."""
     chars = list(candidate)
     wild = [i for i, c in enumerate(chars) if c == "?" or (i >= 4 and not c.isdigit())]
-    if not wild:
+    if not wild or len(wild) > 4:
         return []
     charset = lambda pos: "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if pos < 4 else "0123456789"
     results = []
@@ -475,7 +475,7 @@ def _brute_force(candidate: str) -> tuple[list[str], int] | None:
     return results2[best_key], best_key[1]
 
 
-def extract_bic(ocr_text: str) -> tuple[str | list | None, str, int]:
+def extract_bic(ocr_text: str, confirmed_check: str | None = None) -> tuple[str | list | None, str, int]:
     """Parse OCR text and return (bic, confidence, edit_distance).
 
     confidence values:
@@ -487,7 +487,7 @@ def extract_bic(ocr_text: str) -> tuple[str | list | None, str, int]:
     upper      = ocr_text.upper()
     condensed  = _condense(upper)
     alnum_only = re.sub(r"[^A-Z0-9]", "", condensed)
-    wild_condensed = re.sub(r"[^A-Z0-9?]", "?", re.sub(r"[\s\-_\.]", "", upper))
+    wild_condensed = re.sub(r"[^A-Z0-9?]", "?", re.sub(r"[\s\-_\./]", "", upper))
 
     # Exact: valid BIC present in raw output.
     # ISO 6346: the 4th character is the equipment category identifier.
@@ -566,6 +566,14 @@ def extract_bic(ocr_text: str) -> tuple[str | list | None, str, int]:
 
     # 10-char windows: one character dropped entirely
     ambiguous_bics: list[str] = []
+    # Candidates built from the confirmed_check digit (from bic_check_digit field)
+    # when confirmed_check disagrees with the serial's computed check.
+    # These go through _brute_force (serial search) + _brute_force_owner to recover
+    # the correct serial / owner.
+    _pending_serial_brute: list[str] = []
+    # Computed-check BICs for confirmed_check mismatch cases — last-resort fallback
+    # if serial brute-force finds nothing.
+    _mismatch_fallback: list[str] = []
     for bic in (dashed_serial_hits if len(dashed_serial_hits) > 1 else []):
         if bic not in seen:
             seen.add(bic); ambiguous_bics.append(bic)
@@ -579,15 +587,47 @@ def extract_bic(ocr_text: str) -> tuple[str | list | None, str, int]:
             if i + 10 < len(alnum_only) and alnum_only[i + 10].isdigit():
                 if int(alnum_only[i + 10]) != computed:
                     # Only skip if the competing 11-char read is itself a valid BIC.
-                    # If it's not valid, the extra digit is likely a size/type code
-                    # character that landed next to the check digit in the OCR output.
                     if is_valid_bic(w + alnum_only[i + 10]):
                         continue
+                    mismatch_bic = w + alnum_only[i + 10]
+                    if mismatch_bic not in seen:
+                        seen.add(mismatch_bic)
+                        full_candidates.append(mismatch_bic)
+                    # If the next digit matches the separately-confirmed check digit,
+                    # the serial is misread — queue for algebraic solve, same as the
+                    # no-next-digit path, and skip adding the wrong computed-check BIC.
+                    if confirmed_check is not None and alnum_only[i + 10] == confirmed_check:
+                        if mismatch_bic not in _pending_serial_brute:
+                            _pending_serial_brute.append(mismatch_bic)
+                        fallback_bic = w + str(computed)
+                        if fallback_bic not in seen:
+                            seen.add(fallback_bic); _mismatch_fallback.append(fallback_bic)
+                        continue
+            else:
+                # No digit follows this 10-char window in the raw string.
+                # If a check digit was separately confirmed via bic_check_digit and it
+                # disagrees with the computed check, the serial is likely misread — queue
+                # for serial + owner brute-force rather than returning computed check.
+                if confirmed_check is not None and confirmed_check != str(computed):
+                    mismatch_bic = w + confirmed_check
+                    if mismatch_bic not in seen:
+                        seen.add(mismatch_bic); full_candidates.append(mismatch_bic)
+                    if mismatch_bic not in _pending_serial_brute:
+                        _pending_serial_brute.append(mismatch_bic)
+                    fallback_bic = w + str(computed)
+                    if fallback_bic not in seen:
+                        seen.add(fallback_bic); _mismatch_fallback.append(fallback_bic)
+                    continue
             bic = w + str(computed)
             if bic not in seen:
                 seen.add(bic); recovered_candidates.append(bic)
         elif re.fullmatch(r"[A-Z]{3}[A-Z0-9]{7}", w):
             hits = _insert_candidates(w)
+            # Prefer U-category (freight containers) — the 4th letter is almost
+            # always 'U'. Insertions at positions 0-2 shift the existing letters
+            # right, landing non-U chars at position 3; filter those out first.
+            u_hits = [h for h in hits if h[3] == 'U']
+            hits = u_hits if u_hits else hits
             if len(hits) == 1:
                 if hits[0] not in seen:
                     seen.add(hits[0]); recovered_candidates.append(hits[0])
@@ -604,9 +644,9 @@ def extract_bic(ocr_text: str) -> tuple[str | list | None, str, int]:
     for c in recovered_candidates:
         if is_valid_bic(c) and c[3] == 'U':
             return c, "recovered", 1
-    for c in recovered_candidates:
-        if is_valid_bic(c):
-            return c, "recovered", 1
+    # Non-U valid recovered (e.g. misread company name produced wrong owner):
+    # don't return yet — send through brute_force_owner to find the U variant.
+    _non_u_recovered = [c for c in recovered_candidates if is_valid_bic(c) and c[3] != 'U']
 
     wildcard_singles: list[str] = []
     for c in full_candidates:
@@ -620,6 +660,8 @@ def extract_bic(ocr_text: str) -> tuple[str | list | None, str, int]:
                 if h not in seen:
                     seen.add(h); ambiguous_bics.append(h)
     unique_singles = list(dict.fromkeys(wildcard_singles))
+    if confirmed_check:
+        unique_singles = [b for b in unique_singles if b[-1] == confirmed_check]
     if len(unique_singles) == 1:
         return unique_singles[0], "recovered", 1
     elif len(unique_singles) > 1:
@@ -627,7 +669,7 @@ def extract_bic(ocr_text: str) -> tuple[str | list | None, str, int]:
             if h not in seen:
                 seen.add(h); ambiguous_bics.append(h)
 
-    for c in full_candidates + _non_u_blocked:
+    for c in full_candidates + _non_u_blocked + _non_u_recovered:
         # Also include valid BICs whose 4th letter is not 'U' — likely OCR misread of 'U'
         if re.fullmatch(r"[A-Z]{4}\d{7}", c) and (not is_valid_bic(c) or c[3] != 'U'):
             hit = _brute_force_owner(c)
@@ -642,7 +684,70 @@ def extract_bic(ocr_text: str) -> tuple[str | list | None, str, int]:
                     if h not in seen:
                         seen.add(h); ambiguous_bics.append(h)
 
+    # Serial brute-force + owner brute-force for check-digit mismatch candidates.
+    # When the model reads the correct check digit from the box but misreads one
+    # serial digit, _brute_force finds the nearest valid serial.
+    # When the owner is also misread (e.g. RYOU→RYDU), _brute_force_owner finds it.
+    # These candidates may have been removed from full_candidates by the dashed filter,
+    # so we run both brute-force passes here explicitly.
+    for candidate in _pending_serial_brute:
+        if not re.fullmatch(r"[A-Z]{4}\d{7}", candidate):
+            continue
+        # Algebraic solve: given owner + first-5-serial + confirmed_check, find
+        # the unique last serial digit x (0-9) satisfying the ISO 6346 equation.
+        # (sum_of_first_9_chars + x * 2^9) % 11 % 10 == confirmed_check_digit
+        # 2^9 = 512 ≡ 6 (mod 11); modular inverse of 6 mod 11 is 2.
+        prefix9 = candidate[:9]
+        tgt = int(candidate[10])
+        sum9 = sum(_CVAL[c] * (2 ** i) for i, c in enumerate(prefix9))
+        for target in ([tgt, 10] if tgt == 0 else [tgt]):
+            rem = (target - sum9 % 11) % 11
+            x   = (rem * 2) % 11
+            if 0 <= x <= 9:
+                solved = prefix9 + str(x) + str(tgt)
+                if is_valid_bic(solved) and solved not in recovered_candidates:
+                    seen.add(solved)
+                    recovered_candidates.append(solved)
+        # Owner-error fallback: if the owner code itself was misread, brute-force
+        # over owner codes to find the valid U-container BIC.
+        hit = _brute_force_owner(candidate)
+        if hit:
+            cands, dist = hit
+            u_cands = [h for h in cands if h[3] == 'U']
+            for h in (u_cands if u_cands else cands):
+                if h not in seen:
+                    seen.add(h); ambiguous_bics.append(h)
+
+    # Algebraic solve (in the _pending_serial_brute loop above) appended to
+    # recovered_candidates after the earlier recovery check at line ~634.
+    # Re-check now so a solved BIC wins over brute_forced ambiguous candidates.
+    for c in recovered_candidates:
+        if is_valid_bic(c) and c[3] == 'U':
+            return c, "recovered", 1
+    for c in recovered_candidates:
+        if is_valid_bic(c):
+            return c, "recovered", 1
+
     if ambiguous_bics:
+        # When confirmed_check caused serial brute-force, sort candidates so the
+        # most likely correction appears first:
+        #   0 — same owner, only the last serial digit differs  (serial misread at pos 9)
+        #   1 — same owner, other digit differs                 (other serial misread)
+        #   2 — different owner, same serial+check              (owner misread)
+        #   3 — everything else
+        if _pending_serial_brute:
+            def _cand_priority(bic, srcs=_pending_serial_brute):
+                for src in srcs:
+                    if len(bic) == 11 == len(src):
+                        if bic[:4] == src[:4]:
+                            if bic[4:9] == src[4:9] and bic[9] != src[9]:
+                                return 0
+                            return 1
+                        if bic[4:] == src[4:]:
+                            return 2
+                return 3
+            ambiguous_bics.sort(key=_cand_priority)
+
         # Prefer freight containers (4th letter = 'U', ISO 6346)
         u_first = [b for b in ambiguous_bics if len(b) >= 4 and b[3] == 'U']
         effective = u_first if u_first else ambiguous_bics
@@ -659,6 +764,16 @@ def extract_bic(ocr_text: str) -> tuple[str | list | None, str, int]:
             candidates, dist = hit
             return candidates, "brute_forced", dist
 
+    # Final fallback: use the computed-check BICs from mismatch cases.
+    # Reached only when serial brute-force found nothing, meaning the OCR'd check
+    # digit was likely the ISO type-code digit rather than the actual check value.
+    for bic in _mismatch_fallback:
+        if is_valid_bic(bic) and bic[3] == 'U':
+            return bic, "recovered", 1
+    for bic in _mismatch_fallback:
+        if is_valid_bic(bic):
+            return bic, "recovered", 1
+
     return None, "not_found", 0
 
 
@@ -666,13 +781,17 @@ def extract_bic(ocr_text: str) -> tuple[str | list | None, str, int]:
 # Datalab API helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _resize_to(image_bytes: bytes, max_pixels: int) -> bytes:
-    """Downscale image to at most max_pixels, always returning JPEG bytes."""
+def _resize_to(image_bytes: bytes, max_pixels: int, min_pixels: int = 0) -> bytes:
+    """Scale image to fit between min_pixels and max_pixels, returning JPEG bytes."""
     img = Image.open(io.BytesIO(image_bytes))
     if img.mode in ("RGBA", "P"):
         img = img.convert("RGB")
-    if img.width * img.height > max_pixels:
-        scale = (max_pixels / (img.width * img.height)) ** 0.5
+    cur = img.width * img.height
+    if cur > max_pixels:
+        scale = (max_pixels / cur) ** 0.5
+        img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
+    elif min_pixels and cur < min_pixels:
+        scale = (min_pixels / cur) ** 0.5
         img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=92)
@@ -760,6 +879,28 @@ _BIC_SCHEMA = json.dumps({
                 "|  'MOFU 077 1250 4' (serial continues on next line, stop before ISO size code)."
             ),
         },
+        "bic_check_digit": {
+            "type": "string",
+            "description": (
+                "ONLY the single check digit from the small separate box at the right end "
+                "of the BIC. It is always one digit (0-9). "
+                "Read this box directly — do not copy from bic_raw. "
+                "Return null if the box is physically blocked."
+            ),
+        },
+        "bic_owner_code": {
+            "type": "string",
+            "description": (
+                "ONLY the 4-letter owner prefix at the very start of the BIC — "
+                "the block of exactly 4 capital letters before the 6-digit serial number. "
+                "Read each letter independently and very carefully. "
+                "Critical confusion to avoid: D has a flat straight LEFT edge and curves to the right; "
+                "O is a complete oval with NO flat edge anywhere. "
+                "Also watch: I is a plain vertical stroke, L has a short foot at the bottom. "
+                "The 4th letter is almost always U for shipping containers. "
+                "Return exactly 4 capital letters, or null if the owner code is blocked."
+            ),
+        },
     },
     "required": ["bic_raw"],
 })
@@ -811,21 +952,73 @@ CMR_FIELDS = [
     "box23_carrier_signature_stamp", "box24_consignee_signature_stamp",
 ]
 
+_RECEIPT_SCHEMA = json.dumps({
+    "type": "object",
+    "properties": {
+        "issuer_name":       {"type": "string", "description": "Company or person name of the invoice issuer (seller). Read the business name, not a person's name unless it's a sole trader."},
+        "issuer_address":    {"type": "string", "description": "Full address of the issuer: street, postal code, city, country."},
+        "issuer_tax_id":     {"type": "string", "description": "Tax or VAT identification number of the issuer. In Slovenia prefixed SI, e.g. SI12345678. Label may say davčna številka, DDV, ID za DDV."},
+        "issuer_iban":       {"type": "string", "description": "Bank account IBAN of the issuer. Usually labeled TRR or IBAN."},
+        "buyer_name":        {"type": "string", "description": "Name of the buyer or customer. May be labeled Kupec, Naročnik, or just appear as an address block."},
+        "buyer_address":     {"type": "string", "description": "Full address of the buyer: street, postal code, city."},
+        "buyer_tax_id":      {"type": "string", "description": "Tax or VAT ID of the buyer, if shown on the document."},
+        "invoice_number":    {"type": "string", "description": "Invoice or receipt number. In Slovenia labeled RAČUN, Faktura, or similar. Include the full number as printed."},
+        "invoice_date":      {"type": "string", "description": "Date the invoice was issued, as printed on the document."},
+        "due_date":          {"type": "string", "description": "Payment due date. May be labeled Rok plačila, Valuta, or Plačati do."},
+        "items":             {
+            "type": "array",
+            "description": "All line items listed on the invoice. Each row in the items table is one entry.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string", "description": "Product or service name/description for this line."},
+                    "quantity":    {"type": "string", "description": "Quantity and unit, e.g. '100 s', '1 kos', '5 h'."},
+                    "unit_price":  {"type": "string", "description": "Price per unit before VAT."},
+                    "discount_pct":{"type": "string", "description": "Discount percentage for this line, if any."},
+                    "vat_rate":    {"type": "string", "description": "VAT/DDV rate for this line, e.g. '20%' or '9.5%'."},
+                    "line_total":  {"type": "string", "description": "Total amount for this line including VAT."},
+                },
+            },
+        },
+        "subtotal_excl_vat": {"type": "string", "description": "Sum of all items before VAT. May be labeled Osnova, Vrednost brez DDV."},
+        "vat_amount":        {"type": "string", "description": "Total VAT/DDV charged. May appear per rate row and/or as a grand total DDV line."},
+        "total_incl_vat":    {"type": "string", "description": "Grand total the buyer must pay including all VAT. Often labeled Skupaj z DDV or Za plačilo."},
+        "payment_reference": {"type": "string", "description": "Payment reference or sklic number used when making the bank transfer."},
+        "currency":          {"type": "string", "description": "Currency of the invoice, e.g. EUR."},
+    },
+})
+
+RECEIPT_FIELDS = [
+    "issuer_name", "issuer_address", "issuer_tax_id", "issuer_iban",
+    "buyer_name", "buyer_address", "buyer_tax_id",
+    "invoice_number", "invoice_date", "due_date",
+    "items",
+    "subtotal_excl_vat", "vat_amount", "total_incl_vat",
+    "payment_reference", "currency",
+]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Public functions
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _clean_bic_raw(raw: str) -> str:
-    """Post-process ocr_bic() output to fix two common model errors.
+    """Post-process ocr_bic() output to fix common model errors.
 
-    1. Letter in check-digit position (e.g. 'Z' misread from a '7') → replace with '?'
-       so wildcard recovery can fill it in.
-    2. Single digit in check-digit position that makes the full BIC invalid → strip it
-       so extract_bic() computes the correct check digit from the 10-char prefix.
-       This catches the case where the model reads the first digit of the ISO type code
-       (e.g. '4' from '45G1') instead of the actual check digit in the box above it.
+    0. Truncate any extra text beyond the BIC (company names, descriptions, etc.).
+    1. Letter in check-digit position → replace with '?' for wildcard recovery.
+    2. Wrong single digit in check-digit position → strip so extract_bic computes it.
+    3. Bundled last token (e.g. "17" when split should be serial "1" + check "7") → split.
     """
+    # Take only first line — model sometimes dumps company name / image description after a newline
+    raw = raw.split("\n")[0].strip()
+    # Drop everything after the first token that looks like an ISO size/type code (e.g. 45G1)
+    trimmed = []
+    for tok in raw.split():
+        if re.fullmatch(r"\d{2}[A-Z0-9]\d", tok):  # ISO type code pattern
+            break
+        trimmed.append(tok)
+    raw = " ".join(trimmed)
     tokens = raw.split()
     if not tokens or raw.strip().lower() == "none":
         return raw
@@ -839,15 +1032,19 @@ def _clean_bic_raw(raw: str) -> str:
         if len(condensed) == 11 and re.fullmatch(r"[A-Z]{4}\d{7}", condensed):
             if not is_valid_bic(condensed):
                 return " ".join(tokens[:-1])
-    # Case 3: multi-digit last token that produced an invalid 11-char condensed form.
-    # The OCR may have bundled the last serial digit with the check digit into one group
-    # (e.g. "FCBU 86 092 17" where the real split is serial=86?092 check=7).
-    # Strip the bundled token and re-attach only its last character as the check digit,
-    # so that wildcard recovery can fill in the missing serial position.
+    # Case 3: multi-digit last token that produced an invalid or oversized condensed form.
+    # (a) 11-char but wrong check: the model bundled a serial digit with the check.
+    # (b) 12-char: a stray digit (e.g. the first digit of the ISO type code "22G1")
+    #     was appended before the check digit: "FCBU 868092 17" → keep only last char.
     if re.fullmatch(r"\d{2,}", last):
         condensed = re.sub(r"[^A-Z0-9]", "", raw.upper())
         if len(condensed) == 11 and re.fullmatch(r"[A-Z]{4}\d{7}", condensed):
             if not is_valid_bic(condensed):
+                return " ".join(tokens[:-1]) + " " + last[-1]
+        elif len(condensed) == 12 and re.fullmatch(r"[A-Z]{4}\d{8}", condensed):
+            # condensed[:10] + condensed[-1] = owner+serial + last digit as check
+            candidate = condensed[:10] + condensed[-1]
+            if is_valid_bic(candidate):
                 return " ".join(tokens[:-1]) + " " + last[-1]
     return raw
 
@@ -888,25 +1085,69 @@ def check_image_content(image_bytes: bytes, reject_items: list[str]) -> tuple[bo
         return False, ""
 
 
-def ocr_bic(image_bytes: bytes) -> str:
-    """Send a container image to Datalab and return a space-formatted BIC string.
+def ocr_bic(image_bytes: bytes) -> tuple[str, str | None]:
+    """Send a container image to Datalab and return (raw_text, confirmed_check).
 
-    The returned string is fed directly into extract_bic() for check-digit recovery.
-    Returns 'none' if no BIC code is visible.
+    raw_text is space-formatted BIC output fed to extract_bic().
+    confirmed_check is the single check digit read from the dedicated check-digit
+    box (bic_check_digit schema field), or None when unavailable.  It is passed
+    separately to extract_bic() so that a confirmed mismatch with the serial can
+    drive serial brute-force without touching the "next-char" mismatch path used
+    for type-code-bleed recovery.
 
+    Returns ('none', None) if no BIC code is visible.
     Uses extraction_mode='fast' ($6/1K pages) — sufficient for a single code read.
     """
-    image_bytes = _resize_to(image_bytes, 1920 * 1440)
+    image_bytes = _resize_to(image_bytes, 1920 * 1440, min_pixels=1920 * 1440)
     files = {"file": ("image.jpg", image_bytes, "image/jpeg")}
     data  = {"page_schema": _BIC_SCHEMA, "extraction_mode": "fast"}
     result = _post_and_poll("extract", files, data)
     raw_json = result.get("extraction_schema_json", "{}")
+    # DataLabs also returns a raw markdown OCR pass — use it as the primary OCR text
+    # fed to extract_bic(). The schema fields serve as structured supplements.
+    markdown_text = (result.get("markdown") or "").upper()
     try:
         extracted = json.loads(raw_json)
         value = (extracted.get("bic_raw") or "none").strip()
-        return _clean_bic_raw(value)
+        check = (extracted.get("bic_check_digit") or "").strip()
+        cleaned = _clean_bic_raw(value)
+        confirmed = check if re.fullmatch(r"\d", check) else None
+
+        # Owner-code correction: if model re-read the 4 owner letters separately,
+        # use that value when it differs from bic_raw (catches D/O, I/L confusions).
+        owner_code = (extracted.get("bic_owner_code") or "").strip().upper()
+        if re.fullmatch(r"[A-Z]{4}", owner_code):
+            alnum_c = re.sub(r"[^A-Z0-9]", "", cleaned.upper())
+            if len(alnum_c) >= 4 and re.fullmatch(r"[A-Z]{4}", alnum_c[:4]) and alnum_c[:4] != owner_code:
+                cleaned = re.sub(r'^[A-Z]{4}', owner_code, cleaned, count=1)
+            elif (len(alnum_c) >= 3 and re.fullmatch(r"[A-Z]{3}", alnum_c[:3])
+                  and not alnum_c[3:4].isalpha()):
+                # 3-letter condensed prefix: a space in bic_raw marks the covered owner
+                # letter (e.g. "BE U 103036 4"). Substitute the full 4-letter owner_code
+                # so extract_bic() sees a complete 11-char string.
+                cleaned = owner_code + alnum_c[3:]
+
+        # If bic_raw already ends with the confirmed check digit, don't pass it separately
+        tokens = cleaned.split()
+        if tokens and tokens[-1] == confirmed:
+            confirmed = None
+
+        # Primary: schema-cleaned field only. The markdown OCR text contains weight
+        # specs, company names, and table data that generate spurious BIC-like windows.
+        # Fallback: if the schema field has fewer than 10 alnum chars it is too short
+        # to contain a BIC — supplement with markdown so extract_bic() can find it.
+        alnum_c = re.sub(r"[^A-Z0-9]", "", cleaned.upper())
+        if len(alnum_c) < 10 and markdown_text:
+            md_clean = re.sub(
+                r'!\[[^\]]*\]\([^)]*\)\n\n.+?\n\n(?:.+?\n\n)?',
+                '',
+                markdown_text,
+                flags=re.DOTALL,
+            )
+            return cleaned + " " + md_clean, confirmed
+        return cleaned, confirmed
     except (json.JSONDecodeError, AttributeError):
-        return "none"
+        return markdown_text or "none", None
 
 
 def ocr_cmr(image_bytes: bytes, quality: str = "balanced") -> dict:
@@ -929,6 +1170,26 @@ def ocr_cmr(image_bytes: bytes, quality: str = "balanced") -> dict:
     return {k: extracted.get(k) or None for k in CMR_FIELDS}
 
 
+def ocr_receipt(image_bytes: bytes) -> dict:
+    """Send an invoice/receipt image to Datalab and return extracted fields."""
+    log.info(f"ocr_receipt: input {len(image_bytes)/1024:.0f}KB")
+    image_bytes = _resize_to(image_bytes, 3840 * 2160)
+    files = {"file": ("image.jpg", image_bytes, "image/jpeg")}
+    data  = {"page_schema": _RECEIPT_SCHEMA, "extraction_mode": "turbo"}
+    result = _post_and_poll("extract", files, data)
+    raw_json = result.get("extraction_schema_json") or "{}"
+    try:
+        extracted = json.loads(raw_json)
+    except (json.JSONDecodeError, AttributeError):
+        extracted = {}
+    log.info(f"ocr_receipt: got {sum(1 for k in RECEIPT_FIELDS if extracted.get(k))} fields")
+    out = {k: extracted.get(k) or None for k in RECEIPT_FIELDS}
+    # items is a list — keep as-is (may be [] if not found)
+    if not isinstance(out.get("items"), list):
+        out["items"] = []
+    return out
+
+
 def run_pipeline(image_bytes: bytes, mode: str = "auto", job_id: str = "") -> dict:
     """Full pipeline: extract BIC or CMR fields from an image.
 
@@ -942,6 +1203,12 @@ def run_pipeline(image_bytes: bytes, mode: str = "auto", job_id: str = "") -> di
     CMR result keys: fields (dict of 24 CMR field values)
     """
     tag = f"[{job_id}] " if job_id else ""
+    if mode == "receipt":
+        t0 = time.time()
+        fields = ocr_receipt(image_bytes)
+        log.info(f"{tag}datalab receipt done in {time.time()-t0:.1f}s")
+        return {"mode": "receipt", "fields": fields}
+
     if mode == "cmr":
         t0 = time.time()
         fields = ocr_cmr(image_bytes, quality="turbo")
@@ -949,11 +1216,11 @@ def run_pipeline(image_bytes: bytes, mode: str = "auto", job_id: str = "") -> di
         return {"mode": "cmr", "fields": fields}
 
     t0 = time.time()
-    raw = ocr_bic(image_bytes)
-    log.info(f"{tag}datalab bic done in {time.time()-t0:.1f}s — raw={raw!r}")
+    raw, confirmed_check = ocr_bic(image_bytes)
+    log.info(f"{tag}datalab bic done in {time.time()-t0:.1f}s — raw={raw!r} check={confirmed_check!r}")
 
     if raw.strip().lower() != "none":
-        bic_result, confidence, edit_distance = extract_bic(raw)
+        bic_result, confidence, edit_distance = extract_bic(raw, confirmed_check=confirmed_check)
         if bic_result:
             if confidence == "brute_forced":
                 return {
