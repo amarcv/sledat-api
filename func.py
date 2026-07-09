@@ -118,7 +118,7 @@ _POLL_INTERVAL = 0.5  # seconds between status polls
 _POLL_TIMEOUT  = 120  # seconds before TimeoutError
 
 # When True, _spaced_wildcards() also handles two covered serial digits.
-RECOVER_TWO_MISSING: bool = False
+RECOVER_TWO_MISSING: bool = True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -316,8 +316,10 @@ def _spaced_wildcards(text: str) -> list[str]:
                 # Multiple gaps: use only the internal boundary positions
                 boundaries = boundaries[1:-1]
             elif len(boundaries) == 2:
-                # Exactly one gap: insert '?' at that exact position
-                boundaries = [boundaries[1]]
+                # Exactly two tokens: one serial block + check digit.
+                # If the gap were mid-serial the model would have put a space there.
+                # A single merged block means the gap is at the front or back only.
+                boundaries = [0, len(digits) - 1]
             else:
                 boundaries = [0, 5]
             for b in boundaries:
@@ -325,6 +327,11 @@ def _spaced_wildcards(text: str) -> list[str]:
                 if len(candidate) == 11:
                     results.append(candidate)
         elif total == 5:
+            if len(tokens) < 2:
+                # Single merged block with only 5 digits — could be 5 serial digits
+                # (check digit missing) or 4 serial + check (1 gap, ambiguous position).
+                # Can't recover without a visible gap marker; skip.
+                return
             all_pos = list(range(len(digits) + 1))
             for i, b1 in enumerate(all_pos):
                 for b2 in all_pos[i:]:
@@ -863,20 +870,19 @@ _BIC_SCHEMA = json.dumps({
                 "code such as 22G1, 42G1, 45G1, 40HC, etc. This is NOT part of the BIC. "
                 "Do not include it. The BIC ends with the check digit in its bordered box; "
                 "everything on the line below is irrelevant. "
-                "Output all visible BIC characters with a space between each visually separate "
-                "group (a gap or covered section = one space). "
+                "Output ONLY the characters you can clearly read, with a space between each "
+                "visually separate group. If any character is physically blocked, covered, or "
+                "missing, do NOT guess — simply skip it and continue; the gap will appear as a "
+                "space between the groups on either side of the missing character. "
                 "IMPORTANT: the BIC may be split across multiple lines on the container door — "
                 "read ALL lines that form the BIC (owner prefix, then serial digits, then check digit) "
                 "and combine them into one space-separated string. "
-                "Use ? for any character that is covered, scratched out, or unclear. "
-                "If a character is physically blocked or missing, you MUST write ? — do not guess. "
-                "If the check digit looks like a letter instead of a digit, write ? for it. "
-                "If the check digit box is obscured but the rest is readable, output the "
-                "4 letters and 6 serial digits without a check digit. "
+                "If the check digit box is obscured or missing, omit it entirely. "
                 "If no BIC code is visible at all, output exactly: none. "
-                "Examples: 'MSCU 726354 1'  |  'TCLU 70?064 7'  |  'ATRU 81 125 8'  "
+                "Examples: 'MSCU 726354 1'  |  'ATRU 81 125 8'  "
                 "|  'PSSU 802397' (check digit box hidden)  "
                 "|  'CPWU 804 18 8' (digits split across lines, read top-to-bottom)  "
+                "|  'BE U 103036 4' (one owner letter blocked — space left, not guessed)  "
                 "|  'MOFU 077 1250 4' (serial continues on next line, stop before ISO size code)."
             ),
         },
@@ -1093,10 +1099,12 @@ def ocr_bic(image_bytes: bytes) -> tuple[str, str | None]:
         value = (extracted.get("bic_raw") or "none").strip()
         cleaned = _clean_bic_raw(value)
 
-        # Fallback: if the schema field has fewer than 10 alnum chars it is too short
-        # to contain a BIC — supplement with markdown so extract_bic() can find it.
+        # Fallback: if the schema field has too few alnum chars, supplement with markdown.
+        # Threshold of 9: MOFU outputs "MOFU 077" (7 chars) and needs markdown for the
+        # rest; PSSU outputs "PSSU 80397" (9 chars) and has enough — markdown would add
+        # noise (model sometimes dumps a description after the BIC in the schema value).
         alnum_c = re.sub(r"[^A-Z0-9?]", "", cleaned.upper())
-        if len(alnum_c) < 10 and markdown_text:
+        if len(alnum_c) < 9 and markdown_text:
             md_clean = re.sub(
                 r'!\[[^\]]*\]\([^)]*\)\n\n.+?\n\n(?:.+?\n\n)?',
                 '',
