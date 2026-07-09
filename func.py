@@ -316,9 +316,8 @@ def _spaced_wildcards(text: str) -> list[str]:
                 # Multiple gaps: use only the internal boundary positions
                 boundaries = boundaries[1:-1]
             elif len(boundaries) == 2:
-                # Exactly two tokens: one serial block + check digit.
-                # If the gap were mid-serial the model would have put a space there.
-                # A single merged block means the gap is at the front or back only.
+                # Two tokens: serial block + check. Mid-serial gap would show as a
+                # space, so missing digit can only be at front or back of the block.
                 boundaries = [0, len(digits) - 1]
             else:
                 boundaries = [0, 5]
@@ -328,9 +327,7 @@ def _spaced_wildcards(text: str) -> list[str]:
                     results.append(candidate)
         elif total == 5:
             if len(tokens) < 2:
-                # Single merged block with only 5 digits — could be 5 serial digits
-                # (check digit missing) or 4 serial + check (1 gap, ambiguous position).
-                # Can't recover without a visible gap marker; skip.
+                # No visible gap: can't place wildcards without knowing where.
                 return
             all_pos = list(range(len(digits) + 1))
             for i, b1 in enumerate(all_pos):
@@ -1099,10 +1096,8 @@ def ocr_bic(image_bytes: bytes) -> tuple[str, str | None]:
         value = (extracted.get("bic_raw") or "none").strip()
         cleaned = _clean_bic_raw(value)
 
-        # Fallback: if the schema field has too few alnum chars, supplement with markdown.
-        # Threshold of 9: MOFU outputs "MOFU 077" (7 chars) and needs markdown for the
-        # rest; PSSU outputs "PSSU 80397" (9 chars) and has enough — markdown would add
-        # noise (model sometimes dumps a description after the BIC in the schema value).
+        # <9 alnum chars means extraction is too short; fall back to markdown.
+        # (9 chars = owner + 5 serial digits, enough to work with on its own.)
         alnum_c = re.sub(r"[^A-Z0-9?]", "", cleaned.upper())
         if len(alnum_c) < 9 and markdown_text:
             md_clean = re.sub(
